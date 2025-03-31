@@ -1,0 +1,9 @@
+services:
+  pathway_app:
+    build: .
+    container_name: pathway_app
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    command: ["python", "-m", "app.main"]  # Run as module
