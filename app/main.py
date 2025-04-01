@@ -37,7 +37,7 @@ def update_file_data() -> list[tuple[str, str, list]]:
     
     return all_data
 
-# Real-time update loop
+# Real-time updating loop
 while True:
     loop_start = time.time()
     logging.info("=== Starting a new update cycle ===")

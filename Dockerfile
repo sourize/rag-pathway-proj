@@ -1,4 +1,7 @@
-FROM python:3.10
+FROM python:3.10-slim 
+#less powerful
+
+#FROM python:3.10
 
 WORKDIR /app
 
@@ -8,4 +11,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+#EXPOSE 8000
+
 CMD ["python", "app/main.py"]
+#CMD ["python", "-u", "app/main.py"]
+
+
+
