@@ -1,7 +1,6 @@
 from supabase import create_client
 from app.config import SUPABASE_URL, SUPABASE_KEY
 
-# Initialize Supabase Client
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def upload_file(file_path, storage_bucket="rag-data"):

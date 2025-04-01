@@ -6,19 +6,14 @@ from app.supabase_utils import supabase, list_files
 from app.file_processing import download_and_extract
 from app.config import BUCKET_NAME
 
-# Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Define a Pathway schema to hold file data
 class FileSchema(pw.Schema):
     filename: str
     content: str
 
 def update_file_data() -> list[tuple[str, str]]:
-    """
-    List all files in the Supabase bucket, and process them in parallel.
-    Returns a list of tuples: (filename, content).
-    """
+
     file_list = list_files(BUCKET_NAME)
     if not file_list:
         logging.error("No files found in the bucket.")
@@ -37,17 +32,15 @@ def update_file_data() -> list[tuple[str, str]]:
                 logging.error(f"Error processing {file_name}: {e}")
     return all_data
 
-# Real-time update loop: every 10 seconds, update and display the file contents.
+# Real-time update loop: every 60 seconds
 while True:
     loop_start = time.time()
     logging.info("=== Starting a new update cycle ===")
     data_rows = update_file_data()
     if data_rows:
-        # Create a Pathway table from the list of tuples
         table = pw.debug.table_from_rows(FileSchema, data_rows)
         table.debug("RealTimeFiles")
         
-        # Print the processed data to the console
         print("\nProcessed Data:")
         for fname, content in data_rows:
             print(f"\nFile: {fname}\n{'-'*40}\n{content}\n{'-'*40}")
