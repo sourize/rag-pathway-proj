@@ -1,56 +1,33 @@
 import os
-import requests
-import fitz  
-import hashlib
 import logging
-from app.supabase_utils import get_signed_url
+import requests
+import fitz  # PyMuPDF
+from app.supabase_utils import supabase
 
-cache = {}
+CACHE_DIR = "/app/files"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-def compute_hash(file_path: str) -> str:
-    hash_md5 = hashlib.md5()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
 
-def download_and_extract(file_name: str) -> tuple[str, str]:
-    file_url = get_signed_url(file_name)
-    if not file_url:
-        logging.error(f"[{file_name}] Failed to retrieve URL.")
-        return (file_name, None)
+def download_and_extract(filename: str) -> tuple[str, str]:
+    url = supabase.storage.from_("rag-data").create_signed_url(filename, 3600)["signedUrl"]
+    local = os.path.join(CACHE_DIR, filename)
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        with open(local, "wb") as f:
+            f.write(r.content)
+    except Exception as e:
+        logging.error(f"Download {filename}: {e}")
+        return filename, None
 
-    folder_path = "/app/files"
-    os.makedirs(folder_path, exist_ok=True)
-    local_file = os.path.join(folder_path, file_name)
-
-    response = requests.get(file_url)
-    if response.status_code == 200:
-        with open(local_file, "wb") as f:
-            f.write(response.content)
-        logging.info(f"[{file_name}] Downloaded.")
-    else:
-        logging.error(f"[{file_name}] Failed to download: {response.status_code}")
-        return (file_name, None)
-
-    file_hash = compute_hash(local_file)
-    if file_name in cache and cache[file_name][0] == file_hash:
-        logging.info(f"[{file_name}] Using cached content.")
-        return (file_name, cache[file_name][1])
-
-    content = extract_text(local_file, file_name)
-    if content:
-        cache[file_name] = (file_hash, content)
-    return (file_name, content)
-
-def extract_text(file_path: str, file_name: str) -> str:
-    if file_name.endswith(".txt"):
-        with open(file_path, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    elif file_name.endswith(".pdf"):
-        try:
-            doc = fitz.open(file_path)
-            return "\n".join([page.get_text() for page in doc])
-        except Exception as e:
-            logging.error(f"[{file_name}] Error processing PDF: {e}")
-    return None
+    try:
+        if filename.lower().endswith(".txt"):
+            txt = open(local, "r", encoding="utf-8").read()
+        else:
+            doc = fitz.open(local)
+            txt = "\n".join([p.get_text() for p in doc])
+            doc.close()
+        return filename, txt.strip()
+    except Exception as e:
+        logging.error(f"Extract {filename}: {e}")
+        return filename, None
