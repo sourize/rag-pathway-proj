@@ -24,5 +24,4 @@
     EXPOSE 8000
     
     # Use UVICORN directly to avoid extra memory overhead of reloaders
-    CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
-    
+    CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
