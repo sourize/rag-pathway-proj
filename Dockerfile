@@ -1,31 +1,28 @@
-# Use a slim base
-FROM python:3.10-slim
-
-# Set workdir
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    git \
-    curl \
-    libglib2.0-0 \
-    libgl1 \
-    libxrender1 \
-    libsm6 \
-    libxext6 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Optional: for faster Hugging Face model downloads
-ENV HF_HOME=/root/.cache/huggingface
-
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Copy app source
-COPY . .
-
-# Run the app
-CMD ["python", "-m", "app.main"]
+# --- builder stage: install deps ---
+    FROM python:3.10-slim AS builder
+    WORKDIR /app
+    
+    # install build tools (only for compiling any wheels)
+    RUN apt-get update && \
+        apt-get install -y --no-install-recommends build-essential git && \
+        rm -rf /var/lib/apt/lists/*
+    
+    COPY requirements.txt .
+    RUN pip install --no-cache-dir --upgrade pip && \
+        pip install --no-cache-dir -r requirements.txt
+    
+    # --- final stage: copy just the runtime bits ---
+    FROM python:3.10-slim
+    WORKDIR /app
+    
+    # copy only installed libs from builder
+    COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
+    # copy your code
+    COPY . .
+    
+    # Let Render (and Docker) know the app listens on 8000
+    EXPOSE 8000
+    
+    # Use UVICORN directly to avoid extra memory overhead of reloaders
+    CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    
