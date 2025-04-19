@@ -5,7 +5,7 @@ services:
     env: docker
     plan: starter        # free / small instance
     dockerfilePath: Dockerfile
-    startCommand: ""     # we already CMD in Dockerfile, no override
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1     # we already CMD in Dockerfile, no override
     buildCommand: ""     # no extra build step
     port: 8000           # match EXPOSE
     # bump memory if you find 512Mi too small

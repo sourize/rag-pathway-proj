@@ -58,7 +58,7 @@ def chunk_text(text: str, chunk_size: int = 512):
 
 # ———— Embedding ————
 hf_client = InferenceClient(
-    model="sentence-transformers/all-MiniLM-L6-v2",
+    repo_id="sentence-transformers/all-MiniLM-L6-v2",
     token=os.getenv("HF_API_TOKEN"),
 )
 
