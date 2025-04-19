@@ -1,7 +1,7 @@
 # Dockerfile
 FROM python:3.10-slim
 
-# Install only runtime deps
+# runtime system libraries
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       libgl1 libglib2.0-0 \
@@ -9,16 +9,18 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Copy and install only our trimmed requirements
+# copy just the trimmed requirements
 COPY requirements.txt .
+
+# install them
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
-# Copy our code
+# copy your code
 COPY ./app ./app
 
-# Expose port 8000
+# expose the port
 EXPOSE 8000
 
-# Entrypoint
+# launch uvicorn
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
