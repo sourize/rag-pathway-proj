@@ -40,4 +40,3 @@ ENV/
 # Project specific
 /app/files/
 *.pdf
-*.txt
