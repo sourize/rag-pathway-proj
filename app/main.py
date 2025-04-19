@@ -6,75 +6,76 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import faiss
+import requests
+import fitz  # pymupdf
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import pipeline
 from huggingface_hub import InferenceClient
 
 from app.config import BUCKET_NAME
 from app.supabase_utils import list_files, supabase
-from app.file_processing import download_and_extract
 
 # ———— Logging ————
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # ———— FastAPI setup ————
 app = FastAPI()
-
 app.add_middleware(
-  CORSMiddleware,
-  allow_origins=["*"],            # for prod lock this down to your domain
-  allow_credentials=True,
-  allow_methods=["GET","POST"],
-  allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET","POST"],
+    allow_headers=["*"],
 )
-
-
-@app.get("/")
-def health() -> dict:
-    return {"status": "ok", "message": "Service is up"}
 
 class QARequest(BaseModel):
     question: str
 
-# ———— Hugging Face QA model ————
-qa_model = pipeline(
-    "question-answering",
-    model="distilbert-base-uncased-distilled-squad"
-)
+# ———— HF Inference Clients ————
+HF_TOKEN = os.getenv("HF_API_TOKEN")
+embed_client = InferenceClient(model="sentence-transformers/all-MiniLM-L6-v2", token=HF_TOKEN)
+qa_client    = InferenceClient(model="distilbert-base-uncased-distilled-squad", token=HF_TOKEN)
 
 # ———— FAISS vector store ————
 EMBED_DIM = 384
 faiss_index = faiss.IndexFlatL2(EMBED_DIM)
 id_to_meta: dict[int, dict] = {}
 
-# ———— Chunking ————
+# ———— Helpers ————
+
 def chunk_text(text: str, chunk_size: int = 512):
     words = text.split()
     for i in range(0, len(words), chunk_size):
         yield " ".join(words[i : i + chunk_size])
 
-# ———— Embedding ————
-hf_client = InferenceClient(
-    repo_id="sentence-transformers/all-MiniLM-L6-v2",
-    token=os.getenv("HF_API_TOKEN"),
-)
-
 def embed_text(text: str) -> np.ndarray:
-    raw = hf_client.feature_extraction(text)
-    # mean-pool if token-level
-    if isinstance(raw, list) and raw and isinstance(raw[0], list):
-        vec = np.mean(np.array(raw, dtype="float32"), axis=0)
-    else:
-        vec = np.array(raw, dtype="float32")
-    if vec.shape != (EMBED_DIM,):
-        raise ValueError(f"Unexpected embedding shape: {vec.shape}")
-    norm = np.linalg.norm(vec)
-    return vec / norm if norm > 0 else vec
+    raw = embed_client.feature_extraction(text)
+    arr = np.array(raw, dtype="float32")
+    if arr.ndim == 2:
+        arr = arr.mean(axis=0)
+    norm = np.linalg.norm(arr)
+    return (arr/norm) if norm > 0 else arr
 
-# ———— Indexing loop ————
+def download_and_extract(name: str):
+    # identical to before, using supabase.create_signed_url → requests → pymupdf
+    signed = supabase.storage.from_(BUCKET_NAME).create_signed_url(name, 3600)["signedUrl"]
+    r = requests.get(signed, timeout=10)
+    if r.status_code != 200:
+        logging.error(f"download {name} → {r.status_code}")
+        return None
+    path = f"/tmp/{name}"
+    with open(path, "wb") as f:
+        f.write(r.content)
+    if name.lower().endswith(".txt"):
+        txt = open(path, encoding="utf-8").read()
+    else:
+        doc = fitz.open(path)
+        txt = "\n".join(p.get_text() for p in doc)
+        doc.close()
+    return txt
+
+# ———— Indexing Loop ————
 lock = threading.Lock()
 next_id = 0
 
@@ -82,87 +83,68 @@ def update_and_index():
     global next_id
     files = list_files(BUCKET_NAME)
     if not files:
-        logging.warning("No files to index.")
+        logging.info("No files to index.")
         return
 
-    def fetch(fn: str):
-        _, content = download_and_extract(fn)
-        return fn, content
+    def fetch(fn):
+        return fn, download_and_extract(fn)
 
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        futures = {ex.submit(fetch, fn): fn for fn in files}
-        for future in as_completed(futures):
-            fn, content = future.result()
+    with ThreadPoolExecutor(4) as ex:
+        for fn, content in ex.map(fetch, files):
             if not content:
                 continue
             for chunk in chunk_text(content):
                 try:
                     vec = embed_text(chunk)
                 except Exception as e:
-                    logging.warning(f"Skipping chunk from {fn}: {e}")
+                    logging.warning(f"embed {fn} chunk: {e}")
                     continue
                 with lock:
-                    vid = next_id
+                    faiss_index.add(vec.reshape(1,-1))
+                    id_to_meta[next_id] = {"filename": fn, "chunk": chunk}
                     next_id += 1
-                    faiss_index.add(vec.reshape(1, -1))
-                    id_to_meta[vid] = {"filename": fn, "chunk": chunk}
             logging.info(f"Indexed {fn}")
 
 @app.on_event("startup")
-def start_index():
-    # Delay slightly to let other startup tasks complete
+def startup_index():
+    # give FastAPI a moment then index once
     threading.Thread(target=lambda: (time.sleep(2), update_and_index()), daemon=True).start()
 
-# ———— QA endpoint ————
+# ———— QA endpoint (remote HF Inference) ————
 @app.post("/qa")
 def qa(req: QARequest):
     q = req.question.strip()
     if not q:
-        raise HTTPException(400, "Missing question")
-
-    try:
-        q_vec = embed_text(q)
-    except Exception:
-        raise HTTPException(500, "Embedding error")
-
-    D, I = faiss_index.search(q_vec.reshape(1, -1), 3)
-    contexts = [id_to_meta[i]["chunk"] for i in I[0] if i in id_to_meta]
-    if not contexts:
-        return {"answer": "No relevant context found."}
-
-    ctx = "\n".join(contexts)
-    try:
-        out = qa_model(question=q, context=ctx)
-    except Exception:
-        raise HTTPException(500, "QA model error")
-    return {"question": q, "answer": out.get("answer", ""), "score": out.get("score", 0.0), "context_used": contexts}
+        raise HTTPException(400, "No question")
+    q_vec = embed_text(q)
+    D, I = faiss_index.search(q_vec.reshape(1,-1), 3)
+    ctxs = [ id_to_meta[i]["chunk"] for i in I[0] if i in id_to_meta ]
+    if not ctxs:
+        return {"answer":"No context."}
+    payload = {"inputs": {"question": q, "context": "\n".join(ctxs)}}
+    out = qa_client.request(payload)  # generic request
+    return {
+      "question": q,
+      "answer": out.get("answer",""),
+      "score": out.get("score",0.0),
+      "context_used": ctxs
+    }
 
 # ———— Upload & Reindex ————
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    try:
-        contents = await file.read()
-        res = supabase.storage.from_(BUCKET_NAME).upload(file.filename, contents)
-
-        # Check if Supabase returned a conflict
-        if isinstance(res, dict) and res.get("statusCode") == 409:
-            return JSONResponse(
-                status_code=200,
-                content={"message": f"File {file.filename} already exists."}
-            )
-
-        return {"message": f"Uploaded {file.filename}"}
-
-    except Exception as e:
-        print("Upload failed:", e)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    b = file.filename.replace(" ", "_")
+    data = await file.read()
+    res = supabase.storage.from_(BUCKET_NAME).upload(b, data)
+    if isinstance(res, dict) and res.get("statusCode") == 409:
+        return {"message": f"{b} already exists"}
+    return {"message": f"Uploaded {b}"}
 
 @app.post("/reindex")
-def reindex(background_tasks: BackgroundTasks):
-    background_tasks.add_task(update_and_index)
-    return {"message": "Reindex started"}
+def reindex(bg: BackgroundTasks):
+    bg.add_task(update_and_index)
+    return {"message":"reindexing"}
 
-# ———— Run ————
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, workers=1)
